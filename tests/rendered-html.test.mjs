@@ -53,6 +53,24 @@ test("ships accessible scenario controls in the initial HTML", async () => {
   assert.match(html, /Educational stochastic model/);
 });
 
+test("server-renders the report CVaR timing switch and manual timing fallback", async () => {
+  const response = await render();
+  const html = await response.text();
+
+  const timingSwitch = html.match(/<input\b(?=[^>]*role="switch")(?=[^>]*aria-describedby="report-timing-detail")[^>]*>/)?.[0];
+  const protectionSlider = html.match(/<input\b(?=[^>]*aria-label="Final years protected")[^>]*>/)?.[0];
+
+  assert.ok(timingSwitch, "the report timing switch should be server-rendered");
+  assert.doesNotMatch(timingSwitch, /\bchecked(?:="")?\b/);
+  assert.match(html, /<strong>Use report CVaR timing<\/strong>/);
+  assert.match(html, /Model A: 16 years · Model B: 28 years/);
+  assert.match(html, /id="report-timing-detail"/);
+  assert.match(html, /Manual timing is active at 30 of 30 years/);
+
+  assert.ok(protectionSlider, "the manual protection slider should be server-rendered");
+  assert.doesNotMatch(protectionSlider, /\bdisabled(?:="")?\b/);
+});
+
 test("server-renders accessible Strategy, Scenario, and Sequence Lab navigation", async () => {
   const response = await render();
   const html = await response.text();

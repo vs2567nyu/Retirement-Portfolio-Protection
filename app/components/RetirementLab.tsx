@@ -31,6 +31,10 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ScenarioStudio } from "./ScenarioStudio";
 import { SequenceLab } from "./SequenceLab";
+import {
+  REPORT_CVAR_PROTECTION_YEARS,
+  reportCvarProtectionYears,
+} from "./strategyLabLogic";
 
 type ModelKey = "model_a" | "model_b";
 
@@ -270,10 +274,15 @@ export function RetirementLab() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
+  const [useReportTiming, setUseReportTiming] = useState(false);
   const initialized = useRef(false);
   const latestScenario = useRef<Scenario>(DEFAULT_SCENARIO);
 
   const horizon = Math.max(1, scenario.retirement_age - scenario.current_age);
+  const reportTimingYears = reportCvarProtectionYears(scenario.model, horizon);
+  const reportTimingTarget = REPORT_CVAR_PROTECTION_YEARS[scenario.model];
+  const reportTimingStartAge = scenario.retirement_age - reportTimingYears;
+  const reportTimingIsCapped = reportTimingYears < reportTimingTarget;
   const completedModel = isModelB(result?.metadata.model) ? "model_b" : "model_a";
   const completedIsModelB = completedModel === "model_b";
 
@@ -281,12 +290,14 @@ export function RetirementLab() {
     setScenario((current) => {
       const next = { ...current, ...patch };
       const nextHorizon = Math.max(1, next.retirement_age - next.current_age);
-      next.protection_years = clamp(next.protection_years, 0, nextHorizon);
+      next.protection_years = useReportTiming
+        ? reportCvarProtectionYears(next.model, nextHorizon)
+        : clamp(next.protection_years, 0, nextHorizon);
       latestScenario.current = next;
       return next;
     });
     setDirty(true);
-  }, []);
+  }, [useReportTiming]);
 
   const runSimulation = useCallback(async (request: Scenario) => {
     setLoading(true);
@@ -374,6 +385,13 @@ export function RetirementLab() {
     latestScenario.current = request;
     setScenario(request);
     void runSimulation(request);
+  };
+
+  const toggleReportTiming = (enabled: boolean) => {
+    setUseReportTiming(enabled);
+    if (enabled) {
+      updateScenario({ protection_years: reportTimingYears });
+    }
   };
 
   return (
@@ -464,6 +482,7 @@ export function RetirementLab() {
               onClick={() => {
                 latestScenario.current = DEFAULT_SCENARIO;
                 setScenario(DEFAULT_SCENARIO);
+                setUseReportTiming(false);
                 setDirty(true);
               }}
             >
@@ -564,10 +583,37 @@ export function RetirementLab() {
 
           <div className="control-divider" />
 
+          <label
+            className={`protection-toggle ${useReportTiming ? "is-active" : ""}`}
+            htmlFor="report-cvar-timing"
+            aria-label="Use report CVaR timing"
+          >
+            <input
+              id="report-cvar-timing"
+              type="checkbox"
+              role="switch"
+              checked={useReportTiming}
+              aria-describedby="report-timing-detail"
+              onChange={(event) => toggleReportTiming(event.target.checked)}
+            />
+            <span className="protection-toggle__track" aria-hidden="true"><span /></span>
+            <span className="protection-toggle__copy">
+              <strong>Use report CVaR timing</strong>
+              <small>Model A: 16 years · Model B: 28 years</small>
+            </span>
+          </label>
+          <p id="report-timing-detail" className="protection-timing-status" aria-live="polite">
+            {useReportTiming
+              ? reportTimingIsCapped
+                ? `The report window is ${reportTimingTarget} years. This shorter horizon protects all ${reportTimingYears} remaining years from age ${reportTimingStartAge}.`
+                : `${scenario.model === "model_a" ? "Model A" : "Model B"} protects the final ${reportTimingYears} years, starting at age ${reportTimingStartAge}.`
+              : `Manual timing is active at ${scenario.protection_years} of ${horizon} years.`}
+          </p>
+
           <div className="range-field">
             <div className="range-field__header">
               <span>Final years protected</span>
-              <strong>{scenario.protection_years} of {horizon}</strong>
+              <strong>{useReportTiming ? `${scenario.protection_years} report timing` : `${scenario.protection_years} of ${horizon}`}</strong>
             </div>
             <input
               aria-label="Final years protected"
@@ -576,6 +622,7 @@ export function RetirementLab() {
               max={horizon}
               step={1}
               value={scenario.protection_years}
+              disabled={useReportTiming}
               onChange={(event) => updateScenario({ protection_years: Number(event.target.value) })}
             />
             <div className="range-field__scale"><span>Never</span><span>Always</span></div>
