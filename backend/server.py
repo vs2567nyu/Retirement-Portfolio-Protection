@@ -15,18 +15,79 @@ import argparse
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 from typing import Any
+from urllib.parse import urlsplit
 
 from .engine import ValidationError, simulate_model_a
 from .model_b import simulate_model_b
 from .sequence_risk import build_sequence_risk_payload
 
 
-ALLOWED_ORIGINS = {
+ALLOWED_ORIGINS = frozenset({
     "http://localhost:3000",
     "http://127.0.0.1:3000",
-}
+    "https://vs2567nyu.github.io",
+})
+PRODUCTION_ORIGIN_ENV = "RETIREMENT_ALLOWED_ORIGIN"
 MAX_REQUEST_BYTES = 1_000_000
+PUBLIC_API_MAX_PATHS = 100_000
+
+
+def _normalize_http_origin(value: str | None) -> str | None:
+    """Return a canonical HTTP origin, rejecting paths and credentials."""
+
+    if not value:
+        return None
+    candidate = value.strip()
+    try:
+        parsed = urlsplit(candidate)
+        port = parsed.port
+    except ValueError:
+        return None
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        return None
+
+    host = parsed.hostname.lower()
+    if ":" in host:
+        host = f"[{host}]"
+    authority = f"{host}:{port}" if port is not None else host
+    return f"{parsed.scheme.lower()}://{authority}"
+
+
+def _allowed_origins() -> frozenset[str]:
+    """Combine fixed local/site origins with one optional deployment origin."""
+
+    origins = set(ALLOWED_ORIGINS)
+    configured_origin = _normalize_http_origin(os.environ.get(PRODUCTION_ORIGIN_ENV))
+    if configured_origin:
+        origins.add(configured_origin)
+    return frozenset(origins)
+
+
+def _enforce_public_path_limit(payload: Any) -> None:
+    """Protect the public HTTP service without narrowing offline engine use."""
+
+    if not isinstance(payload, dict):
+        return
+    for field_name in ("paths", "n_paths", "simulations"):
+        value = payload.get(field_name)
+        if (
+            not isinstance(value, bool)
+            and isinstance(value, (int, float))
+            and value > PUBLIC_API_MAX_PATHS
+        ):
+            raise ValidationError(
+                f"paths must not exceed {PUBLIC_API_MAX_PATHS:,} for public API requests"
+            )
 
 
 class SimulationHandler(BaseHTTPRequestHandler):
@@ -35,10 +96,10 @@ class SimulationHandler(BaseHTTPRequestHandler):
     server_version = "RetirementSimulation/1.0"
 
     def _cors_origin(self) -> str | None:
-        origin = self.headers.get("Origin")
-        return origin if origin in ALLOWED_ORIGINS else None
+        origin = _normalize_http_origin(self.headers.get("Origin"))
+        return origin if origin in _allowed_origins() else None
 
-    def _send_json(self, status: HTTPStatus, payload: Any) -> None:
+    def _send_json(self, status: HTTPStatus, payload: Any, *, include_body: bool = True) -> None:
         encoded = json.dumps(payload, separators=(",", ":"), allow_nan=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -49,7 +110,8 @@ class SimulationHandler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", allowed_origin)
             self.send_header("Vary", "Origin")
         self.end_headers()
-        self.wfile.write(encoded)
+        if include_body:
+            self.wfile.write(encoded)
 
     def do_OPTIONS(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         origin = self._cors_origin()
@@ -61,11 +123,29 @@ class SimulationHandler(BaseHTTPRequestHandler):
             return
         self.send_response(HTTPStatus.NO_CONTENT)
         self.send_header("Access-Control-Allow-Origin", origin)
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, HEAD, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.send_header("Access-Control-Max-Age", "600")
         self.send_header("Vary", "Origin")
         self.end_headers()
+
+    def do_HEAD(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+        if self.path.rstrip("/") == "/api/health":
+            self._send_json(
+                HTTPStatus.OK,
+                {
+                    "status": "ok",
+                    "service": "retirement-simulation",
+                    "models": ["model_a", "model_b"],
+                },
+                include_body=False,
+            )
+            return
+        self._send_json(
+            HTTPStatus.NOT_FOUND,
+            {"error": {"type": "not_found", "message": "route not found"}},
+            include_body=False,
+        )
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         if self.path.rstrip("/") == "/api/health":
@@ -119,6 +199,7 @@ class SimulationHandler(BaseHTTPRequestHandler):
             # to make browser clients easy to integrate.
             if isinstance(payload, dict) and set(payload) == {"scenario"}:
                 payload = payload["scenario"]
+            _enforce_public_path_limit(payload)
             requested_model = payload.get("model", "model_a") if isinstance(payload, dict) else "model_a"
             if requested_model in ("model_a", "a", "Model A"):
                 result = simulate_model_a(payload)

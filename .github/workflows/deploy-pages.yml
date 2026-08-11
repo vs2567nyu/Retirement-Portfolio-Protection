@@ -1,0 +1,66 @@
+name: Deploy Retirement Protection Lab
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_PAGES: "true"
+      NEXT_PUBLIC_MODEL_API_URL: https://retirement-protection-api.onrender.com
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build static presentation
+        run: npm run build -- --prerender-all
+
+      - name: Assemble GitHub Pages artifact
+        run: |
+          set -euo pipefail
+          mkdir -p dist/pages
+          cp -R dist/client/Retirement-Portfolio-Protection/. dist/pages/
+          cp -R public/. dist/pages/
+          cp dist/server/prerendered-routes/index.html dist/pages/index.html
+          cp dist/server/prerendered-routes/404.html dist/pages/404.html
+          perl -pi -e 's{href="/favicon\.svg"}{href="/Retirement-Portfolio-Protection/favicon.svg"}g' dist/pages/index.html dist/pages/404.html
+          touch dist/pages/.nojekyll
+          test -s dist/pages/index.html
+          test -d dist/pages/_next/static
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: dist/pages
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
