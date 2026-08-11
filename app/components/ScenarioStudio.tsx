@@ -13,7 +13,6 @@ import {
   Target,
 } from "lucide-react";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { runBrowserSimulation } from "../lib/browser-simulation/client";
 import {
   bestStrategy,
   buildSimulationPayload,
@@ -192,10 +191,26 @@ async function requestSimulation(
   paths: number,
   signal: AbortSignal,
 ) {
-  return await runBrowserSimulation(
-    buildSimulationPayload(model, profile, seed, paths),
+  const apiBase = process.env.NEXT_PUBLIC_MODEL_API_URL ?? "http://127.0.0.1:8000";
+  const response = await fetch(`${apiBase}/api/simulate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(buildSimulationPayload(model, profile, seed, paths)),
     signal,
-  ) as SimulationResponse;
+  });
+
+  if (!response.ok) {
+    let message = `Simulation failed (${response.status})`;
+    try {
+      const body = (await response.json()) as { error?: { message?: string } };
+      message = body.error?.message ?? message;
+    } catch {
+      // Keep the status-based message if the service did not return JSON.
+    }
+    throw new Error(message);
+  }
+
+  return (await response.json()) as SimulationResponse;
 }
 
 async function requestPair(
@@ -444,7 +459,7 @@ export function ScenarioStudio() {
         paths: PATHS,
       });
       if (baseline.modelA.status === "error" && baseline.modelB.status === "error") {
-        setError("Neither market model completed. Try the run again or reduce the path count.");
+        setError("Neither market model completed. Check that the local calculation engine is running.");
       }
       window.setTimeout(() => resultsHeading.current?.focus(), 0);
     } catch (reason) {
@@ -661,7 +676,7 @@ export function ScenarioStudio() {
           {error ? (
             <div className="studio-error" role="alert">
               <CircleAlert size={18} />
-              <div><strong>The calculation did not complete.</strong><span>{error}</span></div>
+              <div><strong>The model engine did not complete this run.</strong><span>{error}</span></div>
             </div>
           ) : null}
 

@@ -21,7 +21,6 @@ import {
   Shuffle,
 } from "lucide-react";
 import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { loadBundledSequenceRisk } from "../lib/browser-simulation/sequenceRisk";
 import {
   compareSequences,
   normalizeSequenceDataset,
@@ -423,7 +422,10 @@ export function SequenceLab() {
       setLoading(true);
       setError(null);
       try {
-        const payload = await loadBundledSequenceRisk(controller.signal);
+        const apiBase = process.env.NEXT_PUBLIC_MODEL_API_URL ?? "http://127.0.0.1:8000";
+        const response = await fetch(`${apiBase}/api/sequence-risk`, { signal: controller.signal });
+        if (!response.ok) throw new Error(`Historical sequence data failed to load (${response.status}).`);
+        const payload = await response.json() as unknown;
         setDataset(normalizeSequenceDataset(payload));
       } catch (reason) {
         if (reason instanceof DOMException && reason.name === "AbortError") return;

@@ -29,7 +29,6 @@ import {
   Target,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { runBrowserSimulation } from "../lib/browser-simulation/client";
 import { ScenarioStudio } from "./ScenarioStudio";
 import { SequenceLab } from "./SequenceLab";
 
@@ -273,8 +272,6 @@ export function RetirementLab() {
   const [dirty, setDirty] = useState(false);
   const initialized = useRef(false);
   const latestScenario = useRef<Scenario>(DEFAULT_SCENARIO);
-  const activeController = useRef<AbortController | null>(null);
-  const runRequestId = useRef(0);
 
   const horizon = Math.max(1, scenario.retirement_age - scenario.current_age);
   const completedModel = isModelB(result?.metadata.model) ? "model_b" : "model_a";
@@ -292,16 +289,20 @@ export function RetirementLab() {
   }, []);
 
   const runSimulation = useCallback(async (request: Scenario) => {
-    const thisRequest = runRequestId.current + 1;
-    runRequestId.current = thisRequest;
-    activeController.current?.abort();
-    const controller = new AbortController();
-    activeController.current = controller;
     setLoading(true);
     setError(null);
     try {
-      const next = await runBrowserSimulation(request, controller.signal) as SimulationResponse;
-      if (runRequestId.current !== thisRequest) return;
+      const apiBase = process.env.NEXT_PUBLIC_MODEL_API_URL ?? "http://127.0.0.1:8000";
+      const response = await fetch(`${apiBase}/api/simulate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(request),
+      });
+      if (!response.ok) {
+        const body = await response.text();
+        throw new Error(body || `Simulation failed (${response.status})`);
+      }
+      const next = (await response.json()) as SimulationResponse;
       setResult(next);
       setLastRun(request);
       setDirty(!sameScenario(latestScenario.current, request));
@@ -309,14 +310,9 @@ export function RetirementLab() {
         setSelectedKey(next.strategies[0]?.key ?? "s1");
       }
     } catch (reason) {
-      if (reason instanceof DOMException && reason.name === "AbortError") return;
-      if (runRequestId.current !== thisRequest) return;
-      setError(reason instanceof Error ? reason.message : "The calculation could not finish.");
+      setError(reason instanceof Error ? reason.message : "The model engine did not respond.");
     } finally {
-      if (runRequestId.current === thisRequest) {
-        activeController.current = null;
-        setLoading(false);
-      }
+      setLoading(false);
     }
   }, [selectedKey]);
 
@@ -325,8 +321,6 @@ export function RetirementLab() {
     initialized.current = true;
     void runSimulation(DEFAULT_SCENARIO);
   }, [runSimulation]);
-
-  useEffect(() => () => activeController.current?.abort(), []);
 
   const selected = useMemo(
     () => result?.strategies.find((strategy) => strategy.key === selectedKey) ?? result?.strategies[0],
@@ -449,12 +443,12 @@ export function RetirementLab() {
         </div>
       </header>
 
+      {activeSection === "strategy" ? (
       <div
         id="strategy-lab-panel"
         className="lab-layout"
         role="tabpanel"
         aria-labelledby="strategy-lab-tab"
-        hidden={activeSection !== "strategy"}
       >
         <aside className="control-rail" aria-label="Scenario controls">
           <div className="rail-heading">
@@ -660,7 +654,7 @@ export function RetirementLab() {
             <div className="engine-alert" role="alert">
               <CircleAlert size={20} />
               <div>
-                <strong>The calculation did not complete.</strong>
+                <strong>The calculation engine is not connected yet.</strong>
                 <p>{error}</p>
               </div>
               <button type="button" onClick={() => void runSimulation(scenario)}>Try again</button>
@@ -884,16 +878,13 @@ export function RetirementLab() {
                       </span>
                       <code title={result?.metadata.dataset_sha256}>{shortHash(result?.metadata.dataset_sha256)}</code>
                       <span>Compared with Model A on calibrated log-return moments, not exact simple-return moments.</span>
-                      <span>The observed sample ends in 2018, is bounded by those 91 years, and is not a claim that the same market history will recur.</span>
                     </>
                   ) : (
                     <>
                       <span>Market calibration uses stock and bond log-return means, volatilities, log-return correlation, and the historical risk-free rate. Scenario and design inputs are set explicitly.</span>
                       <span>Compared with Model B on calibrated log-return moments, not exact simple-return moments.</span>
-                      <span>Returns are IID with constant parameters, so volatility clustering, regime changes, and crisis correlations are not modeled.</span>
                     </>
                   )}
-                  <span>The annual put premium is held constant within each model. Trading costs, bid-ask spreads, and intrayear option timing are excluded.</span>
                 </div>
               </div>
             </article>
@@ -948,8 +939,7 @@ export function RetirementLab() {
           </footer>
         </section>
       </div>
-      <div hidden={activeSection !== "studio"}><ScenarioStudio /></div>
-      <div hidden={activeSection !== "sequence"}><SequenceLab /></div>
+      ) : activeSection === "studio" ? <ScenarioStudio /> : <SequenceLab />}
     </main>
   );
 }
